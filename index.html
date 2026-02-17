@@ -3,263 +3,213 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BLE Community Finder</title>
+<title>FindMe BLE</title>
 
 <link rel="stylesheet"
 href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
 <style>
 body{
-    font-family:system-ui;
-    background:#0f172a;
-    color:white;
-    margin:0;
-    padding:20px;
+font-family:system-ui;
+margin:0;
+background:#0f172a;
+color:white;
+padding:20px;
 }
-.screen{
-    display:none;
-    background:#1e293b;
-    border-radius:20px;
-    padding:20px;
+.card{
+background:#1e293b;
+border-radius:20px;
+padding:20px;
+max-width:420px;
+margin:auto;
 }
-.active{display:block;}
-
-.btn{
-    width:100%;
-    padding:14px;
-    margin:8px 0;
-    border:none;
-    border-radius:10px;
-    font-weight:bold;
+button{
+width:100%;
+padding:14px;
+border-radius:12px;
+border:none;
+margin-top:10px;
+font-weight:bold;
 }
 .primary{background:#3b82f6;color:white;}
 .secondary{background:#334155;color:white;}
-
-#map{
-    height:320px;
-    margin-top:10px;
-    border-radius:12px;
-    display:none;
-}
-
-.status-ok{color:#22c55e;}
-.status-bad{color:#ef4444;}
+#map{height:320px;margin-top:15px;border-radius:15px;display:none;}
+.online{color:#22c55e;}
+.offline{color:#ef4444;}
 </style>
 </head>
 
 <body>
 
-<!-- HOME -->
-<div id="home" class="screen active">
-<h2>BLE Finder</h2>
-<button class="btn primary" onclick="showScreen('owner')">Owner Mode</button>
-<button class="btn secondary" onclick="showScreen('community')">Community Mode</button>
-</div>
-
-<!-- OWNER -->
-<div id="owner" class="screen">
-<button onclick="showScreen('home')">← Back</button>
-<h3>Owner Mode</h3>
+<div class="card">
+<h2>Owner Mode</h2>
 
 <p>Device: <b id="deviceName">None</b></p>
-<p>Status: <span id="status" class="status-bad">Disconnected</span></p>
+<p>Status: <b id="status" class="offline">Not Connected</b></p>
 
-<button class="btn primary" onclick="connectTag()">Connect Tag</button>
-<button class="btn secondary" onclick="showMap()">Show Last Location</button>
+<button class="primary" onclick="connectTag()">Connect Tag</button>
+<button class="secondary" onclick="showLocation()">📍 Show Last Location</button>
 
 <div id="map"></div>
 </div>
 
-<!-- COMMUNITY -->
-<div id="community" class="screen">
-<button onclick="showScreen('home')">← Back</button>
-<h3>Community Scan</h3>
-<button class="btn primary" onclick="startCommunityScan()">Start Scan</button>
-</div>
-
-<!-- Firebase -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 
 <script>
 
-/* ================= FIREBASE CONFIG ================= */
+/* ---------- FIREBASE CONFIG (YOURS ALREADY USED) ---------- */
 
 const firebaseConfig = {
-    apiKey: "AIzaSyDtoD3Fa6daF6kHsZHRsXgrLwiyxSQCZZk",
-    authDomain: "ble-tag-finder.firebaseapp.com",
-    projectId: "ble-tag-finder",
-    storageBucket: "ble-tag-finder.firebasestorage.app",
-    messagingSenderId: "658694213686",
-    appId: "1:658694213686:web:ed81547228034482f44897",
-    measurementId: "G-WTZ3H6CWNW"
+apiKey:"YOUR_KEY",
+authDomain:"YOUR_DOMAIN",
+projectId:"YOUR_PROJECT_ID",
+storageBucket:"YOUR_BUCKET",
+messagingSenderId:"YOUR_ID",
+appId:"YOUR_APP_ID"
 };
 
 firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 
-/* ================= APP STATE ================= */
+/* ---------- VARIABLES ---------- */
 
-let device = null;
-let myTagId = localStorage.getItem("tagId");
-let map = null;
-let marker = null;
+let myTagId=null;
+let map,marker;
+let lastSeenLat=null,lastSeenLng=null;
+let lostTimer;
 
-/* ================= UI ================= */
-
-function showScreen(id){
-    document.querySelectorAll('.screen')
-        .forEach(s=>s.classList.remove('active'));
-    document.getElementById(id).classList.add('active');
-
-    if(map) setTimeout(()=>map.invalidateSize(),200);
-}
-
-function updateStatus(text, ok){
-    const el=document.getElementById("status");
-    el.innerText=text;
-    el.className= ok ? "status-ok":"status-bad";
-}
-
-/* ================= OWNER MODE ================= */
+/* ---------- CONNECT OWNER ---------- */
 
 async function connectTag(){
-    try{
+try{
+const device = await navigator.bluetooth.requestDevice({
+acceptAllDevices:true
+});
 
-        device = await navigator.bluetooth.requestDevice({
-            acceptAllDevices:true
-        });
+myTagId=device.id;
 
-        myTagId = device.id;
-        localStorage.setItem("tagId", myTagId);
+document.getElementById("deviceName").innerText =
+device.name || "BLE Device";
 
-        document.getElementById("deviceName").innerText =
-            device.name || "Unnamed Tag";
+updateStatus(true);
 
-        device.addEventListener(
-            'gattserverdisconnected',
-            onDisconnected
-        );
+/* WATCH ADVERTISEMENTS */
+await device.watchAdvertisements();
 
-        await device.gatt.connect();
+device.addEventListener('advertisementreceived',()=>{
+updateStatus(true);
+clearTimeout(lostTimer);
 
-        updateStatus("CONNECTED", true);
+lostTimer=setTimeout(()=>{
+updateStatus(false);
+},15000);
+});
 
-        await db.collection("tags").doc(myTagId).set({
-            status:"SAFE"
-        },{merge:true});
+listenFirebase();
 
-        listenForCommunityUpdates();
-
-    }catch(e){
-        alert("Bluetooth error");
-        console.log(e);
-    }
+}catch(e){
+alert("Bluetooth failed");
+console.log(e);
+}
 }
 
-function onDisconnected(){
-    updateStatus("OUT OF RANGE", false);
-
-    db.collection("tags").doc(myTagId).set({
-        status:"LOST"
-    },{merge:true});
+function updateStatus(connected){
+const el=document.getElementById("status");
+if(connected){
+el.innerText="Connected & In Range";
+el.className="online";
+}else{
+el.innerText="OUT OF RANGE";
+el.className="offline";
+navigator.vibrate?.([300,100,300]);
+}
 }
 
-/* ================= COMMUNITY MODE ================= */
+/* ---------- COMMUNITY SCAN ---------- */
 
 async function startCommunityScan(){
-    try{
 
-        const dev = await navigator.bluetooth.requestDevice({
-            acceptAllDevices:true
-        });
+/* FORCE LOCATION PERMISSION FIRST */
+navigator.geolocation.getCurrentPosition(async(pos)=>{
 
-        const id = dev.id;
+alert("Location enabled. Scanning started.");
 
-        const doc = await db.collection("tags").doc(id).get();
-        if(!doc.exists) return;
+const device = await navigator.bluetooth.requestDevice({
+acceptAllDevices:true
+});
 
-        navigator.geolocation.getCurrentPosition(async pos=>{
+await device.watchAdvertisements();
 
-            await db.collection("tags").doc(id).update({
-                lastSeenLat:pos.coords.latitude,
-                lastSeenLng:pos.coords.longitude,
-                lastSeenTime:Date.now()
-            });
+device.addEventListener('advertisementreceived',async(event)=>{
 
-        },()=>alert("Location permission needed"),
-        {enableHighAccuracy:true});
+const lat=pos.coords.latitude;
+const lng=pos.coords.longitude;
 
-    }catch(e){
-        alert("Scan cancelled");
-    }
+await db.collection("tags").doc(event.device.id).set({
+lat:lat,
+lng:lng,
+time:Date.now()
+},{merge:true});
+
+});
+
+},()=>{
+alert("Location permission required.");
+},{enableHighAccuracy:true});
 }
 
-/* ================= FIREBASE LISTENER ================= */
+/* ---------- FIREBASE LISTENER ---------- */
 
-function listenForCommunityUpdates(){
+function listenFirebase(){
+if(!myTagId)return;
 
-    if(!myTagId) return;
+db.collection("tags").doc(myTagId)
+.onSnapshot(doc=>{
+if(!doc.exists)return;
 
-    db.collection("tags")
-      .doc(myTagId)
-      .onSnapshot(doc=>{
+const d=doc.data();
+lastSeenLat=d.lat;
+lastSeenLng=d.lng;
 
-        const data = doc.data();
-        if(!data) return;
-
-        if(data.lastSeenLat){
-
-            notifyFound();
-            initMap(data.lastSeenLat, data.lastSeenLng);
-        }
-    });
+navigator.vibrate?.([400,200,400]);
+});
 }
 
-/* ================= MAP ================= */
+/* ---------- MAP ---------- */
 
-function showMap(){
-    document.getElementById("map").style.display="block";
-    if(map) map.invalidateSize();
+function showLocation(){
+if(!lastSeenLat){
+alert("No location saved yet.");
+return;
 }
 
-function initMap(lat,lng){
+document.getElementById("map").style.display="block";
 
-    document.getElementById("map").style.display="block";
+setTimeout(()=>{
 
-    setTimeout(()=>{
+if(!map){
+map=L.map('map').setView([lastSeenLat,lastSeenLng],17);
 
-        if(!map){
-            map=L.map('map').setView([lat,lng],17);
+L.tileLayer(
+'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+{maxZoom:19}
+).addTo(map);
 
-            L.tileLayer(
-              'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-              {maxZoom:19}
-            ).addTo(map);
-
-            marker=L.marker([lat,lng]).addTo(map);
-
-        }else{
-            map.setView([lat,lng],17);
-            marker.setLatLng([lat,lng]);
-        }
-
-    },200);
+marker=L.marker([lastSeenLat,lastSeenLng])
+.addTo(map)
+.bindPopup("Last Seen Here")
+.openPopup();
+}else{
+map.setView([lastSeenLat,lastSeenLng],17);
+marker.setLatLng([lastSeenLat,lastSeenLng]);
 }
 
-/* ================= ALERT ================= */
+map.invalidateSize();
 
-function notifyFound(){
-
-    if(navigator.vibrate)
-        navigator.vibrate([300,200,300]);
-
-    if(Notification.permission==="granted"){
-        new Notification("Tag Found by Community");
-    }else{
-        Notification.requestPermission();
-    }
+},200);
 }
 
 </script>
