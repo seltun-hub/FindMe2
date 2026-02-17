@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BLE Community Finder</title>
+
+<link rel="stylesheet"
+href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+body{
+    font-family:system-ui;
+    background:#0f172a;
+    color:white;
+    margin:0;
+    padding:20px;
+}
+.screen{
+    display:none;
+    background:#1e293b;
+    border-radius:20px;
+    padding:20px;
+}
+.active{display:block;}
+
+.btn{
+    width:100%;
+    padding:14px;
+    margin:8px 0;
+    border:none;
+    border-radius:10px;
+    font-weight:bold;
+}
+.primary{background:#3b82f6;color:white;}
+.secondary{background:#334155;color:white;}
+
+#map{
+    height:320px;
+    margin-top:10px;
+    border-radius:12px;
+    display:none;
+}
+
+.status-ok{color:#22c55e;}
+.status-bad{color:#ef4444;}
+</style>
+</head>
+
+<body>
+
+<!-- HOME -->
+<div id="home" class="screen active">
+<h2>BLE Finder</h2>
+<button class="btn primary" onclick="showScreen('owner')">Owner Mode</button>
+<button class="btn secondary" onclick="showScreen('community')">Community Mode</button>
+</div>
+
+<!-- OWNER -->
+<div id="owner" class="screen">
+<button onclick="showScreen('home')">← Back</button>
+<h3>Owner Mode</h3>
+
+<p>Device: <b id="deviceName">None</b></p>
+<p>Status: <span id="status" class="status-bad">Disconnected</span></p>
+
+<button class="btn primary" onclick="connectTag()">Connect Tag</button>
+<button class="btn secondary" onclick="showMap()">Show Last Location</button>
+
+<div id="map"></div>
+</div>
+
+<!-- COMMUNITY -->
+<div id="community" class="screen">
+<button onclick="showScreen('home')">← Back</button>
+<h3>Community Scan</h3>
+<button class="btn primary" onclick="startCommunityScan()">Start Scan</button>
+</div>
+
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
+<script>
+
+/* ================= FIREBASE CONFIG ================= */
+
+const firebaseConfig = {
+    apiKey: "AIzaSyDtoD3Fa6daF6kHsZHRsXgrLwiyxSQCZZk",
+    authDomain: "ble-tag-finder.firebaseapp.com",
+    projectId: "ble-tag-finder",
+    storageBucket: "ble-tag-finder.firebasestorage.app",
+    messagingSenderId: "658694213686",
+    appId: "1:658694213686:web:ed81547228034482f44897",
+    measurementId: "G-WTZ3H6CWNW"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
+/* ================= APP STATE ================= */
+
+let device = null;
+let myTagId = localStorage.getItem("tagId");
+let map = null;
+let marker = null;
+
+/* ================= UI ================= */
+
+function showScreen(id){
+    document.querySelectorAll('.screen')
+        .forEach(s=>s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+
+    if(map) setTimeout(()=>map.invalidateSize(),200);
+}
+
+function updateStatus(text, ok){
+    const el=document.getElementById("status");
+    el.innerText=text;
+    el.className= ok ? "status-ok":"status-bad";
+}
+
+/* ================= OWNER MODE ================= */
+
+async function connectTag(){
+    try{
+
+        device = await navigator.bluetooth.requestDevice({
+            acceptAllDevices:true
+        });
+
+        myTagId = device.id;
+        localStorage.setItem("tagId", myTagId);
+
+        document.getElementById("deviceName").innerText =
+            device.name || "Unnamed Tag";
+
+        device.addEventListener(
+            'gattserverdisconnected',
+            onDisconnected
+        );
+
+        await device.gatt.connect();
+
+        updateStatus("CONNECTED", true);
+
+        await db.collection("tags").doc(myTagId).set({
+            status:"SAFE"
+        },{merge:true});
+
+        listenForCommunityUpdates();
+
+    }catch(e){
+        alert("Bluetooth error");
+        console.log(e);
+    }
+}
+
+function onDisconnected(){
+    updateStatus("OUT OF RANGE", false);
+
+    db.collection("tags").doc(myTagId).set({
+        status:"LOST"
+    },{merge:true});
+}
+
+/* ================= COMMUNITY MODE ================= */
+
+async function startCommunityScan(){
+    try{
+
+        const dev = await navigator.bluetooth.requestDevice({
+            acceptAllDevices:true
+        });
+
+        const id = dev.id;
+
+        const doc = await db.collection("tags").doc(id).get();
+        if(!doc.exists) return;
+
+        navigator.geolocation.getCurrentPosition(async pos=>{
+
+            await db.collection("tags").doc(id).update({
+                lastSeenLat:pos.coords.latitude,
+                lastSeenLng:pos.coords.longitude,
+                lastSeenTime:Date.now()
+            });
+
+        },()=>alert("Location permission needed"),
+        {enableHighAccuracy:true});
+
+    }catch(e){
+        alert("Scan cancelled");
+    }
+}
+
+/* ================= FIREBASE LISTENER ================= */
+
+function listenForCommunityUpdates(){
+
+    if(!myTagId) return;
+
+    db.collection("tags")
+      .doc(myTagId)
+      .onSnapshot(doc=>{
+
+        const data = doc.data();
+        if(!data) return;
+
+        if(data.lastSeenLat){
+
+            notifyFound();
+            initMap(data.lastSeenLat, data.lastSeenLng);
+        }
+    });
+}
+
+/* ================= MAP ================= */
+
+function showMap(){
+    document.getElementById("map").style.display="block";
+    if(map) map.invalidateSize();
+}
+
+function initMap(lat,lng){
+
+    document.getElementById("map").style.display="block";
+
+    setTimeout(()=>{
+
+        if(!map){
+            map=L.map('map').setView([lat,lng],17);
+
+            L.tileLayer(
+              'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+              {maxZoom:19}
+            ).addTo(map);
+
+            marker=L.marker([lat,lng]).addTo(map);
+
+        }else{
+            map.setView([lat,lng],17);
+            marker.setLatLng([lat,lng]);
+        }
+
+    },200);
+}
+
+/* ================= ALERT ================= */
+
+function notifyFound(){
+
+    if(navigator.vibrate)
+        navigator.vibrate([300,200,300]);
+
+    if(Notification.permission==="granted"){
+        new Notification("Tag Found by Community");
+    }else{
+        Notification.requestPermission();
+    }
+}
+
+</script>
+</body>
+</html>
